@@ -1,0 +1,47 @@
+name: Fork macOS checks
+
+on:
+  push:
+    branches: [custom/main, 'feature/**']
+  pull_request:
+    branches: [custom/main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    if: github.repository == 'gchust/ClinePassBridge'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            goarch: amd64
+          - runner: macos-15
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Validate fork release logic
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - name: Test and package the native macOS library
+        env:
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          version="$(python3 -c 'import json; print(json.load(open("marketplace/registry.json"))["plugins"][0]["version"])')"
+          bash .github/scripts/build-macos.sh "$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: check-darwin-${{ matrix.goarch }}
+          path: dist/clinepassbridge_*.zip
+          if-no-files-found: error
