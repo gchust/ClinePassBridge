@@ -42,10 +42,12 @@ type Service struct {
 	stickyMu         sync.Mutex
 	sticky           map[string]*stickySession
 	stickyWriteError string
+	warmupDelay      func(attempt int) time.Duration
+	warmupTimeout    time.Duration
 }
 
 func NewService() *Service {
-	return &Service{cfg: defaultConfig(), creds: map[string]Credential{}, authFiles: map[string]string{}, streams: map[string]struct{}{}, revoked: map[string]bool{}, stopCh: make(chan struct{}), usageCache: map[string]*usageCacheEntry{}, usageSlots: make(chan struct{}, 3), sticky: map[string]*stickySession{}}
+	return &Service{cfg: defaultConfig(), creds: map[string]Credential{}, authFiles: map[string]string{}, streams: map[string]struct{}{}, revoked: map[string]bool{}, stopCh: make(chan struct{}), usageCache: map[string]*usageCacheEntry{}, usageSlots: make(chan struct{}, 3), sticky: map[string]*stickySession{}, warmupDelay: defaultWarmupDelay, warmupTimeout: defaultWarmupTimeout}
 }
 func (s *Service) SetHost(h func(string, any, any) error) { s.mu.Lock(); s.host = h; s.mu.Unlock() }
 func (s *Service) call(method string, in, out any) error {

@@ -22,7 +22,7 @@ func (s *Service) registerManagement(raw json.RawMessage) (any, error) {
 	for _, p := range []string{"status", "logs", "models", "config", "credentials", "credentials/usage", "sticky"} {
 		routes = append(routes, map[string]string{"Method": "GET", "Path": apiBase + "/" + p})
 	}
-	for _, p := range []string{"models/refresh", "models/test", "credentials"} {
+	for _, p := range []string{"models/refresh", "models/test", "credentials", "sticky/test"} {
 		routes = append(routes, map[string]string{"Method": "POST", "Path": apiBase + "/" + p})
 	}
 	for _, p := range []string{"models", "config", "credentials"} {
@@ -130,6 +130,8 @@ func (s *Service) management(raw json.RawMessage) (any, error) {
 			s.resetSticky(r.Query.Get("id"), "")
 		}
 		return response, err
+	case "POST /sticky/test":
+		return s.testSticky(r)
 	case "GET /sticky":
 		return s.stickyResponse()
 	case "DELETE /sticky":

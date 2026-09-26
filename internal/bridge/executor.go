@@ -46,7 +46,7 @@ func (s *Service) prepare(r *ExecutorRequest) (map[string]any, Credential, strin
 	if p := object(object(j["providerOptions"])["gateway"]); len(p) > 0 {
 		return nil, c, "", fail(400, "providerOptions.gateway pinning is currently ignored by Cline; use automatic routing")
 	}
-	r.taskID = s.stickyTaskID(c, up)
+	r.taskID = s.stickyTaskID(r, c, up)
 	return j, c, up, nil
 }
 func headers(c Credential, taskID string) http.Header {
@@ -200,7 +200,7 @@ func (s *Service) readJSON(up upstreamStream) ([]byte, error) {
 	return b.Bytes(), nil
 }
 func (s *Service) newLog(r ExecutorRequest, c Credential, up string) LogEntry {
-	entry := LogEntry{ID: id(), Time: time.Now().UTC(), Model: r.Model, UpstreamModel: up, Stream: r.Stream, Provider: "unknown", ProviderSource: "not_reported", Credential: c.Label, Attempts: []Attempt{}}
+	entry := LogEntry{ID: id(), Time: time.Now().UTC(), Model: r.Model, UpstreamModel: up, Stream: r.Stream, Provider: "unknown", ProviderSource: "not_reported", Credential: c.Label, Attempts: append([]Attempt{}, r.warmups...)}
 	if r.taskID != "" {
 		entry.TaskID, entry.stickyKey = r.taskID, stickyKey(c.ID, up)
 	}

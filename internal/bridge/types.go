@@ -37,6 +37,8 @@ type ExecutorRequest struct {
 	StreamID                                               string `json:"stream_id"`
 	HostCallbackID                                         string `json:"host_callback_id"`
 	taskID                                                 string
+	warmups                                                []Attempt
+	skipWarmup                                             bool
 }
 type Response struct {
 	Payload  []byte
@@ -92,12 +94,15 @@ type Config struct {
 	LogRetention     int     `json:"log_retention" yaml:"log_retention"`
 	MaxResponseBytes int     `json:"max_response_bytes" yaml:"max_response_bytes"`
 	StickySession    bool    `json:"sticky_session" yaml:"sticky_session"`
+	// StickyWarmupAttempts bounds the warm-ups for a fresh session; 0 disables them.
+	StickyWarmupAttempts int `json:"sticky_warmup_attempts" yaml:"sticky_warmup_attempts"`
 }
 
 const minLogRetention, maxLogRetention = 50, 99999999
+const maxStickyWarmupAttempts = 20
 
 func defaultConfig() Config {
-	return Config{DataDir: "plugins/clinepassbridge-data", BaseURL: "https://api.cline.bot/api/v1", Models: []Model{}, NonstreamMode: "stream-aggregate", TimeoutSeconds: 180, LogRetention: 1000, MaxResponseBytes: 16 << 20, StickySession: true}
+	return Config{DataDir: "plugins/clinepassbridge-data", BaseURL: "https://api.cline.bot/api/v1", Models: []Model{}, NonstreamMode: "stream-aggregate", TimeoutSeconds: 180, LogRetention: 1000, MaxResponseBytes: 16 << 20, StickySession: true, StickyWarmupAttempts: 10}
 }
 func (c *Config) validate() error {
 	u, e := url.Parse(c.BaseURL)
@@ -109,6 +114,9 @@ func (c *Config) validate() error {
 	}
 	if c.LogRetention < minLogRetention || c.LogRetention > maxLogRetention {
 		return fail(400, fmt.Sprintf("log_retention must be between %d and %d", minLogRetention, maxLogRetention))
+	}
+	if c.StickyWarmupAttempts < 0 || c.StickyWarmupAttempts > maxStickyWarmupAttempts {
+		return fail(400, fmt.Sprintf("sticky_warmup_attempts must be between 0 and %d", maxStickyWarmupAttempts))
 	}
 	if c.MaxResponseBytes < 65536 || c.MaxResponseBytes > 64<<20 {
 		return fail(400, "max_response_bytes must be between 64 KiB and 64 MiB")

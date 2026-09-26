@@ -82,6 +82,8 @@ func (s *Service) testModel(r ManagementRequest) (any, error) {
 		AuthID: in.CredentialID, Model: in.Model, HostCallbackID: r.HostCallbackID,
 		deadline: start.Add(time.Duration(cfg.TimeoutSeconds) * time.Second),
 		Payload:  []byte(`{"messages":[{"role":"user","content":"Reply with OK only."}],"max_tokens":64}`),
+		// The probe measures the model itself; the sticky test covers warm-ups.
+		skipWarmup: true,
 	}
 	j, credential, upstream, err := s.prepare(&req)
 	if err == nil && upstream != in.UpstreamID {
@@ -125,7 +127,7 @@ func (s *Service) testModel(r ManagementRequest) (any, error) {
 		attempt.Error = safeError(fmt.Errorf("%s", redactModelTest(err.Error(), credential)))
 	}
 	entry.Status, entry.DurationMS, entry.Error = attempt.Status, duration, redactModelTest(attempt.Error, credential)
-	entry.Attempts = []Attempt{attempt}
+	entry.Attempts = append(entry.Attempts, attempt)
 	s.appendLog(entry)
 	// Upstream 401/403 are test results, not failures of CPA management authentication.
 	return managementJSON(200, map[string]any{
