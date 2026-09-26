@@ -36,6 +36,9 @@ type ExecutorRequest struct {
 	AuthAttributes                                         map[string]string
 	StreamID                                               string `json:"stream_id"`
 	HostCallbackID                                         string `json:"host_callback_id"`
+	taskID                                                 string
+	warmups                                                []Attempt
+	skipWarmup                                             bool
 }
 type Response struct {
 	Payload  []byte
@@ -78,6 +81,9 @@ type Model struct {
 	ID         string   `json:"id" yaml:"id"`
 	UpstreamID string   `json:"upstream_id" yaml:"upstream_id"`
 	Providers  []string `json:"providers" yaml:"providers"`
+	// StickyProvider is the channel the sticky session is expected to hold.
+	// Empty means the model's plan head, the only channel the gateway can pin.
+	StickyProvider string `json:"sticky_provider,omitempty" yaml:"sticky_provider,omitempty"`
 }
 type Config struct {
 	DataDir          string  `json:"data_dir" yaml:"data_dir"`
@@ -87,10 +93,19 @@ type Config struct {
 	TimeoutSeconds   int     `json:"timeout_seconds" yaml:"timeout_seconds"`
 	LogRetention     int     `json:"log_retention" yaml:"log_retention"`
 	MaxResponseBytes int     `json:"max_response_bytes" yaml:"max_response_bytes"`
+	// StickyMode is "reuse" (one task ID per credential and model), "per_request"
+	// (a new task ID on every request, so nothing is pinned) or "off" (no header;
+	// the gateway then falls back to its own per-key default session).
+	StickyMode string `json:"sticky_mode" yaml:"sticky_mode"`
+	// StickyWarmupAttempts bounds the warm-ups for a fresh session; 0 disables them.
+	StickyWarmupAttempts int `json:"sticky_warmup_attempts" yaml:"sticky_warmup_attempts"`
 }
 
+const minLogRetention, maxLogRetention = 50, 99999999
+const maxStickyWarmupAttempts = 20
+
 func defaultConfig() Config {
-	return Config{DataDir: "plugins/clinepassbridge-data", BaseURL: "https://api.cline.bot/api/v1", Models: []Model{}, NonstreamMode: "stream-aggregate", TimeoutSeconds: 180, LogRetention: 1000, MaxResponseBytes: 16 << 20}
+	return Config{DataDir: "plugins/clinepassbridge-data", BaseURL: "https://api.cline.bot/api/v1", Models: []Model{}, NonstreamMode: "stream-aggregate", TimeoutSeconds: 180, LogRetention: 1000, MaxResponseBytes: 16 << 20, StickyMode: stickyReuse, StickyWarmupAttempts: 10}
 }
 func (c *Config) validate() error {
 	u, e := url.Parse(c.BaseURL)
@@ -100,8 +115,17 @@ func (c *Config) validate() error {
 	if c.TimeoutSeconds < 10 || c.TimeoutSeconds > 1800 {
 		return fail(400, "timeout_seconds must be between 10 and 1800")
 	}
-	if c.LogRetention < 50 || c.LogRetention > 10000 {
-		return fail(400, "log_retention must be between 50 and 10000")
+	if c.LogRetention < minLogRetention || c.LogRetention > maxLogRetention {
+		return fail(400, fmt.Sprintf("log_retention must be between %d and %d", minLogRetention, maxLogRetention))
+	}
+	if c.StickyMode == "" {
+		c.StickyMode = stickyReuse
+	}
+	if c.StickyMode != stickyReuse && c.StickyMode != stickyPerRequest && c.StickyMode != stickyOff {
+		return fail(400, "sticky_mode must be reuse, per_request or off")
+	}
+	if c.StickyWarmupAttempts < 0 || c.StickyWarmupAttempts > maxStickyWarmupAttempts {
+		return fail(400, fmt.Sprintf("sticky_warmup_attempts must be between 0 and %d", maxStickyWarmupAttempts))
 	}
 	if c.MaxResponseBytes < 65536 || c.MaxResponseBytes > 64<<20 {
 		return fail(400, "max_response_bytes must be between 64 KiB and 64 MiB")
@@ -118,6 +142,10 @@ func (c *Config) validate() error {
 		seen[m.ID] = true
 		if strings.TrimSpace(m.UpstreamID) == "" || strings.ContainsAny(m.ID+m.UpstreamID, "\r\n\t") {
 			return fail(400, "model identifiers must be nonempty and contain no control whitespace")
+		}
+		m.StickyProvider = strings.TrimSpace(m.StickyProvider)
+		if len(m.StickyProvider) > 64 || strings.ContainsAny(m.StickyProvider, "\r\n\t") {
+			return fail(400, "sticky_provider must be at most 64 characters without control whitespace")
 		}
 	}
 	return nil
@@ -149,6 +177,13 @@ type LogEntry struct {
 	Credential       string    `json:"credential"`
 	Attempts         []Attempt `json:"attempts"`
 	Error            string    `json:"error,omitempty"`
+	// Session affinity facts reported by the gateway for the X-Task-Id sent.
+	TaskID         string `json:"task_id,omitempty"`
+	Affinity       string `json:"affinity,omitempty"`
+	PinnedProvider string `json:"pinned_provider,omitempty"`
+	PlanHead       string `json:"plan_head,omitempty"`
+	PlanSize       int    `json:"plan_size,omitempty"`
+	stickyKey      string
 }
 
 func jsonBytes(v any) []byte      { b, _ := json.Marshal(v); return b }

@@ -22,10 +22,16 @@ type hostPlan struct {
 }
 
 type fakeHost struct {
-	mu             sync.Mutex
-	plans          []hostPlan
-	opened         []bool
-	callbackIDs    []string
+	mu          sync.Mutex
+	plans       []hostPlan
+	opened      []bool
+	callbackIDs []string
+	headers     []http.Header
+	bodies      [][]byte
+	// gate, when set, holds the first upstream request until it is closed.
+	gate           chan struct{}
+	gateEntered    chan struct{}
+	gated          bool
 	streams        map[string][]readChunk
 	reads          map[string]int
 	upstreamClosed []string
@@ -47,6 +53,16 @@ func newFakeHost(plans ...hostPlan) *fakeHost {
 
 func (h *fakeHost) call(method string, payload, out any) error {
 	request, _ := payload.(map[string]any)
+	if method == "host.http.do_stream" && h.gate != nil {
+		h.mu.Lock()
+		first := !h.gated
+		h.gated = true
+		h.mu.Unlock()
+		if first {
+			close(h.gateEntered)
+			<-h.gate
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	switch method {
@@ -65,7 +81,13 @@ func (h *fakeHost) call(method string, payload, out any) error {
 			return err
 		}
 		h.opened = append(h.opened, parsed.Stream)
+		h.bodies = append(h.bodies, bytes.Clone(body))
 		h.callbackIDs = append(h.callbackIDs, str(request["host_callback_id"]))
+		if header, ok := request["headers"].(http.Header); ok {
+			h.headers = append(h.headers, header.Clone())
+		} else {
+			h.headers = append(h.headers, nil)
+		}
 		plan := h.plans[len(h.opened)-1]
 		streamID := fmt.Sprintf("upstream-%d", len(h.opened))
 		h.streams[streamID] = plan.chunks
@@ -111,6 +133,8 @@ func registeredService(t *testing.T, mode string) *Service {
 	t.Helper()
 	s := NewService()
 	configYAML := fmt.Sprintf("data_dir: %q\n", filepath.ToSlash(t.TempDir()))
+	// Warm-ups add upstream requests; sticky_test.go covers them explicitly.
+	configYAML += "sticky_warmup_attempts: 0\n"
 	configYAML += "models:\n  - id: deepseek-flash\n    upstream_id: cline-pass/deepseek-v4.1-flash\n"
 	if mode != "" {
 		configYAML += fmt.Sprintf("nonstream_mode: %s\n", mode)

@@ -19,16 +19,18 @@ const apiBase = "/v0/management/clinepassbridge"
 
 func (s *Service) registerManagement(raw json.RawMessage) (any, error) {
 	routes := []map[string]string{}
-	for _, p := range []string{"status", "logs", "models", "config", "credentials", "credentials/usage"} {
+	for _, p := range []string{"status", "logs", "models", "config", "credentials", "credentials/usage", "sticky"} {
 		routes = append(routes, map[string]string{"Method": "GET", "Path": apiBase + "/" + p})
 	}
-	for _, p := range []string{"models/refresh", "models/test", "credentials"} {
+	for _, p := range []string{"models/refresh", "models/test", "credentials", "sticky/test"} {
 		routes = append(routes, map[string]string{"Method": "POST", "Path": apiBase + "/" + p})
 	}
 	for _, p := range []string{"models", "config", "credentials"} {
 		routes = append(routes, map[string]string{"Method": "PUT", "Path": apiBase + "/" + p})
 	}
-	routes = append(routes, map[string]string{"Method": "DELETE", "Path": apiBase + "/credentials"})
+	for _, p := range []string{"credentials", "sticky"} {
+		routes = append(routes, map[string]string{"Method": "DELETE", "Path": apiBase + "/" + p})
+	}
 	return map[string]any{"routes": routes, "resources": []map[string]string{{"Path": "/console", "Menu": "ClinePassBridge", "Description": "Cline Pass 模型、凭据与实际上游日志"}}}, nil
 }
 func managementJSON(code int, v any) (any, error) {
@@ -123,7 +125,17 @@ func (s *Service) management(raw json.RawMessage) (any, error) {
 	case "PUT /credentials":
 		return s.updateCredential(r)
 	case "DELETE /credentials":
-		return s.deleteCredential(r.Query.Get("id"))
+		response, err := s.deleteCredential(r.Query.Get("id"))
+		if res, ok := response.(ManagementResponse); ok && res.StatusCode == 200 {
+			s.resetSticky(r.Query.Get("id"), "")
+		}
+		return response, err
+	case "POST /sticky/test":
+		return s.testSticky(r)
+	case "GET /sticky":
+		return s.stickyResponse()
+	case "DELETE /sticky":
+		return managementJSON(200, map[string]any{"deleted": s.resetSticky(r.Query.Get("credential_id"), r.Query.Get("model"))})
 	default:
 		return managementJSON(404, map[string]any{"error": "not found"})
 	}

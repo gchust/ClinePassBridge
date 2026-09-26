@@ -152,7 +152,9 @@
     .model-test-error summary span:last-child { flex-shrink: 0; text-decoration: underline; }
     .model-test-error pre { margin: 9px 0 0; padding: 12px; border: 1px solid var(--inset-line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; }
     #credentialList { display: grid; gap: 14px; }
-    .credentials-panel { margin-bottom: 24px; }
+    .credentials-panel, .sticky-panel { margin-bottom: 24px; }
+    .sticky-panel .panel-head { flex-wrap: wrap; }
+    #stickyList { display: grid; gap: 10px; }
     .credentials-panel .panel-head { flex-wrap: wrap; }
     .credential-row { display: grid; grid-template-columns: minmax(180px, .9fr) minmax(0, 2fr); gap: 14px 24px; border-radius: 9px; padding: 18px 18px 12px; min-width: 0; background: var(--inset-bg); }
     .credential-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -320,6 +322,11 @@
         <div class="credential-footer"><p class="panel-hint">当前页约每分钟更新 · 时间为本地时区</p><div class="pagination" id="credentialPagination" hidden><button class="button compact" id="credentialPrev" type="button">上一页</button><span id="credentialPageInfo"></span><button class="button compact" id="credentialNext" type="button">下一页</button></div></div>
         <p class="inline-state" id="credentialState" role="status"></p>
       </div>
+      <div class="panel sticky-panel">
+        <div class="panel-head"><div><h2>会话粘滞</h2><p class="panel-hint">每个（模型，凭据）复用一个 X-Task-Id；第 2 次请求起网关确认并钉住该模型计划首位的渠道</p></div><div class="row-actions"><button class="button compact" id="refreshSticky" type="button">刷新</button><button class="button compact danger" id="resetAllSticky" type="button">全部重置</button></div></div>
+        <div id="stickyList" aria-live="polite"><div class="empty">正在读取会话…</div></div>
+        <p class="inline-state" id="stickyState" role="status"></p>
+      </div>
       <div class="config-grid">
         <div class="panel">
           <div class="panel-head"><div><h2>模型映射</h2><p class="panel-hint">客户端名称与 Cline Pass 上游模型</p></div><div class="row-actions"><button class="button compact primary" id="openModel" type="button">添加模型</button></div></div>
@@ -331,8 +338,10 @@
           <div class="panel-head"><div><h2>请求与日志设置</h2><p class="panel-hint">仅影响本插件</p></div></div>
           <form class="form-stack" id="settingsForm">
             <div class="field"><label for="nonstreamMode">非流式处理</label><select class="control" id="nonstreamMode"><option value="native">原生非流式</option><option value="native-fallback">原生优先，必要时聚合流式</option><option value="stream-aggregate">直接聚合流式（推荐）</option></select></div>
+            <div class="field"><label for="stickyMode">会话粘滞</label><select class="control" id="stickyMode"><option value="reuse">复用会话：钉住计划首位渠道（推荐）</option><option value="per_request">每次新会话：每条请求用新的 X-Task-Id，不钉住</option><option value="off">不发送 X-Task-Id：网关按 API key 用默认会话</option></select></div>
+            <div class="field"><label for="stickyWarmup">新会话预热次数（0 关闭）</label><input class="control" id="stickyWarmup" type="number" min="0" max="20" step="1" required><p class="panel-hint">仅用于“复用会话”：新会话先发极小请求确认落在目标渠道，落错就换会话重试，最多占用一半请求超时</p></div>
             <div class="field"><label for="timeoutSeconds">请求超时（秒）</label><input class="control" id="timeoutSeconds" type="number" min="10" max="1800" step="1" required></div>
-            <div class="field"><label for="logRetention">日志保留条数</label><input class="control" id="logRetention" type="number" min="50" max="10000" step="1" required></div>
+            <div class="field"><label for="logRetention">日志保留条数</label><input class="control" id="logRetention" type="number" min="50" max="99999999" step="1" required></div>
             <div class="form-foot"><button class="button primary" id="saveSettings" type="submit">保存设置</button></div>
           </form>
           <p class="inline-state" id="settingsState"></p>
@@ -360,6 +369,7 @@
     <form class="form-stack" id="modelForm" autocomplete="off">
       <div class="field"><label for="modelId">客户端模型名称</label><input class="control mono" id="modelId" required placeholder="例如 deepseek-v4.1-flash" autocomplete="off"></div>
       <div class="field"><label for="upstreamId">Cline Pass 上游模型</label><input class="control mono" id="upstreamId" required placeholder="例如 cline-pass/deepseek-v4.1-flash" autocomplete="off"></div>
+      <div class="field"><label for="stickyProvider">期望上游（可选）</label><input class="control mono" id="stickyProvider" maxlength="64" placeholder="例如 deepseek；留空则钉该模型计划首位" autocomplete="off"></div>
       <p class="inline-state" id="modelDialogState" role="alert"></p>
       <div class="dialog-actions"><button class="button" id="cancelModelEdit" type="button">取消</button><button class="button primary" id="saveModel" type="submit">添加模型</button></div>
     </form>
@@ -392,6 +402,7 @@
     const $ = (id) => document.getElementById(id);
     const state = { key: '', authType: 'bearer', page: 0, total: 0, logsController: null, providers: new Set(), models: [], editingModelIndex: -1, modelBusy: false, config: null, toastTimer: 0, modelCandidates: [], selectedCandidates: new Set(), candidateBusy: false, candidateSnapshot: [], fetchingModels: false, editingCredentialId: '', credentialBusy: false };
     const modelTestResults = new Map();
+    const stickyTestResults = new Map();
     const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
     const present = (value) => value !== null && value !== undefined && String(value).trim() !== '';
     const shown = (value, fallback = '未记录') => present(value) ? esc(value) : fallback;
@@ -567,13 +578,21 @@
       return provider.toLowerCase() === 'unknown' ? '' : provider;
     }
     function datum(label, value, fallback = '未记录') { return `<div><div class="datum-label">${label}</div><div class="datum-value">${shown(value, fallback)}</div></div>`; }
+    function attemptStage(mode) {
+      const stage = { 'sticky-warmup': '预热', 'sticky-confirm': '确认' }[mode];
+      return stage ? ` <span class="subtext">· ${stage}</span>` : '';
+    }
+    function affinityLabel(outcome) {
+      const labels = { confirmed: '已确认钉住', no_pin: '首跳（未钉）', skipped_explicit_order: '显式顺序，未粘滞' };
+      return present(outcome) ? labels[String(outcome).toLowerCase()] || String(outcome) : '';
+    }
     function logMarkup(log) {
       const status = statusInfo(log.status);
       const actual = shown(actualProvider(log.provider), '未知');
       const attempts = Array.isArray(log.attempts) ? log.attempts : [];
       const attemptMarkup = attempts.length ? attempts.map((attempt, index) => {
         const attemptStatus = statusInfo(attempt.status);
-        return `<div class="attempt"><span class="mono">${index + 1}.</span><span class="badge ${attemptStatus.cls}">${attemptStatus.label}</span><strong>${shown(actualProvider(attempt.provider), '未知')}</strong><span>${ms(attempt.duration_ms)}</span><span class="error-text">${shown(attempt.error, '—')}</span></div>`;
+        return `<div class="attempt"><span class="mono">${index + 1}.</span><span class="badge ${attemptStatus.cls}">${attemptStatus.label}</span><strong>${shown(actualProvider(attempt.provider), '未知')}${attemptStage(attempt.mode)}</strong><span>${ms(attempt.duration_ms)}</span><span class="error-text">${shown(attempt.error, '—')}</span></div>`;
       }).join('') : '<div class="subtext">无尝试明细</div>';
       return `<details class="log-entry" data-id="${esc(log.id)}"><summary class="row-main">
         <div class="cell"><span class="cell-label">时间 / 请求</span><div class="primary-text mono">${formatTime(log.time)}</div><div class="subtext mono">${shown(log.id, '无 ID')}</div></div>
@@ -591,6 +610,7 @@
             ${datum('输入 tokens', number(log.prompt_tokens), '--')}
             ${datum('输出 tokens', number(log.completion_tokens), '--')}
             ${datum('缓存 tokens', number(log.cached_tokens), '--')}
+            ${present(log.task_id) ? `${datum('会话粘滞', affinityLabel(log.affinity), '未回报')}${datum('钉住渠道', log.pinned_provider, '—')}${datum('计划首位', present(log.plan_head) ? `${log.plan_head}${log.plan_size ? ` / ${log.plan_size} 渠道` : ''}` : '', '未回报')}` : ''}
           </div>
           ${present(log.error) ? `<div class="attempts"><div class="datum-label">请求错误</div><div class="error-text">${esc(log.error)}</div></div>` : ''}
           <div class="attempts"><strong>尝试明细 · ${attempts.length}</strong>${attemptMarkup}</div>
@@ -648,7 +668,7 @@
       $('refreshModels').hidden = false;
     }
     function renderModels(data) {
-      state.models = Array.isArray(data?.models) ? data.models.map((model) => ({ id: model.id, upstream_id: model.upstream_id, providers: Array.isArray(model.providers) ? [...model.providers] : [] })) : [];
+      state.models = Array.isArray(data?.models) ? data.models.map((model) => ({ id: model.id, upstream_id: model.upstream_id, providers: Array.isArray(model.providers) ? [...model.providers] : [], ...(present(model.sticky_provider) ? { sticky_provider: String(model.sticky_provider) } : {}) })) : [];
       for (const model of state.models) for (const provider of model.providers) if (present(provider)) state.providers.add(String(provider));
       renderProviderOptions();
       renderModelRows();
@@ -673,11 +693,35 @@
       const summary = error.split(/\r?\n/).find((line) => line.trim()) || '测试失败';
       return `<div class="model-test-result"><div class="model-test-meta"><span class="badge ${tone}">${label} · ${time}</span><span>凭据 ${esc(test.credential_label || test.credential_id || '—')}</span>${test.status ? `<span>状态 ${esc(test.status)}</span>` : ''}<span>${formatTime(test.tested_at)}</span></div>${error ? `<details class="model-test-error"><summary><span>${esc(summary)}</span><span>完整错误</span></summary><pre>${esc(error)}</pre></details>` : ''}</div>`;
     }
+    function stickyTestHTML(test) {
+      if (!test) return '';
+      if (test.pending) return '<div class="model-test-result"><span class="subtext" role="status">正在重置会话并预热，确认网关钉住的渠道…</span></div>';
+      if (!Array.isArray(test.probes)) return `<div class="model-test-result"><div class="model-test-meta"><span class="badge bad">粘滞测试失败</span><span>${formatTime(test.tested_at)}</span></div><div class="model-test-error">${esc(test.error || '未知错误')}</div></div>`;
+      const warmups = test.probes.filter((probe) => probe.stage === 'warmup').length;
+      const rows = test.probes.map((probe, index) => `<div class="subtext mono">${index + 1}. ${probe.stage === 'confirm' ? '确认' : '预热'} · ${esc(String(probe.task_id || '').slice(0, 8))}… → ${shown(actualProvider(probe.provider), '未知')} · ${shown(affinityLabel(probe.affinity), '未回报粘滞')}${present(probe.pinned_provider) ? ` ${esc(probe.pinned_provider)}` : ''} · ${ms(probe.duration_ms)}${probe.rotated ? ' · 换新会话' : ''}${present(probe.error) ? ` · <span class="error-text">${esc(probe.error)}</span>` : ''}</div>`).join('');
+      return `<div class="model-test-result"><div class="model-test-meta"><span class="badge ${test.ok ? 'good' : 'warn'}">${test.ok ? `已钉住 ${esc(test.target)}` : '未能钉住目标'}</span><span>预热 ${warmups} 次 · 目标 ${shown(test.target, '未知')} · 共 ${ms(test.duration_ms)}</span><span>${formatTime(test.tested_at)}</span></div>${rows}</div>`;
+    }
+    async function testStickyModel(model) {
+      const credentialID = $('modelTestCredential').value;
+      const key = modelTestKey(model, credentialID);
+      if (!credentialID || stickyTestResults.get(key)?.pending) return;
+      if (!confirm(`测试会重置「${model.id}」在所选凭据下的粘滞会话，并发送几条极小请求（消耗少量额度）。继续？`)) return;
+      stickyTestResults.set(key, { pending: true });
+      renderModelRows();
+      try {
+        const result = await api('/sticky/test', { method: 'POST', fullError: true, body: { model: model.id, credential_id: credentialID } });
+        if (typeof result?.ok !== 'boolean') throw new Error('测试接口返回了无效结果');
+        stickyTestResults.set(key, result);
+      } catch (error) {
+        stickyTestResults.set(key, { error: error.message, tested_at: new Date().toISOString() });
+      } finally { renderModelRows(); loadSticky(); }
+    }
     function renderModelRows() {
       const credential = $('modelTestCredential').value;
       $('modelList').innerHTML = state.models.length ? state.models.map((model, index) => {
         const test = modelTestResults.get(modelTestKey(model));
-        return `<div class="model-row"><div class="model-main"><div class="primary-text mono">${shown(model.id)}</div><div class="subtext mono">→ ${shown(model.upstream_id)}</div></div><div class="row-actions"><button class="button compact test-model" type="button" data-index="${index}" ${!credential || test?.pending ? 'disabled' : ''}>${test?.pending ? '测试中…' : '测试模型'}</button><button class="button compact edit-model" type="button" data-index="${index}">编辑</button><button class="button compact danger delete-model" type="button" data-index="${index}">删除</button></div>${modelTestHTML(test)}</div>`;
+        const sticky = stickyTestResults.get(modelTestKey(model));
+        return `<div class="model-row"><div class="model-main"><div class="primary-text mono">${shown(model.id)}</div><div class="subtext mono">→ ${shown(model.upstream_id)}${present(model.sticky_provider) ? ` · 期望上游 ${esc(model.sticky_provider)}` : ''}</div></div><div class="row-actions"><button class="button compact test-model" type="button" data-index="${index}" ${!credential || test?.pending ? 'disabled' : ''}>${test?.pending ? '测试中…' : '测试模型'}</button><button class="button compact test-sticky" type="button" data-index="${index}" ${!credential || sticky?.pending ? 'disabled' : ''}>${sticky?.pending ? '测试中…' : '测试粘滞'}</button><button class="button compact edit-model" type="button" data-index="${index}">编辑</button><button class="button compact danger delete-model" type="button" data-index="${index}">删除</button></div>${modelTestHTML(test)}${stickyTestHTML(sticky)}</div>`;
       }).join('') : '<div class="empty">暂无模型映射</div>';
     }
     function syncModelTestCredentials() {
@@ -703,7 +747,7 @@
         modelTestResults.set(key, result);
       } catch (error) {
         modelTestResults.set(key, { ok: false, error: error.message, duration_ms: Math.round(performance.now() - started), credential_id: credentialID, tested_at: new Date().toISOString() });
-      } finally { renderModelRows(); }
+      } finally { renderModelRows(); loadSticky(); }
     }
     function candidateChanges(models = state.candidateSnapshot) {
       const initial = new Set(state.candidateSnapshot.map(modelKey));
@@ -854,8 +898,12 @@
     setInterval(() => { if (usageViewVisible()) refreshVisibleUsage(); }, 15000);
     async function loadConfig() {
       try {
-        const [config, models, credentials] = await Promise.all([api('/config'), api('/models'), api('/credentials')]);
+        const [config, models, credentials, sticky] = await Promise.all([api('/config'), api('/models'), api('/credentials'), api('/sticky')]);
         state.config = config || {};
+        $('stickyMode').value = ['reuse', 'per_request', 'off'].includes(config?.sticky_mode) ? config.sticky_mode : 'reuse';
+        $('stickyWarmup').value = present(config?.sticky_warmup_attempts) ? config.sticky_warmup_attempts : 10;
+        dropdowns.get('stickyMode').sync();
+        renderSticky(sticky);
         $('nonstreamMode').value = ['native', 'native-fallback', 'stream-aggregate'].includes(config?.nonstream_mode) ? config.nonstream_mode : 'stream-aggregate';
         dropdowns.get('nonstreamMode').sync();
         $('timeoutSeconds').value = present(config?.timeout_seconds) ? config.timeout_seconds : 120;
@@ -869,6 +917,52 @@
         globalError('');
       } catch (error) { globalError(`配置读取失败：${error.message}`); }
     }
+    function stickyStatus(item) {
+      const pinned = String(item.pinned_provider || '');
+      if (item.warning === 'target_not_plan_head') return { cls: 'bad', label: '无法钉住期望上游' };
+      if (String(item.affinity).toLowerCase() === 'confirmed') return present(item.target) && pinned && pinned.toLowerCase() !== String(item.target).toLowerCase() ? { cls: 'warn', label: `钉在 ${esc(pinned)}` } : { cls: 'good', label: `已钉住 ${shown(pinned || item.last_provider, '')}` };
+      if (String(item.affinity).toLowerCase() === 'no_pin') return { cls: 'warn', label: '首跳未钉 · 下次确认' };
+      if (!Number(item.requests)) return { cls: '', label: '新会话 · 等待首个响应' };
+      return { cls: 'warn', label: present(item.affinity) ? esc(affinityLabel(item.affinity)) : '网关未回报粘滞' };
+    }
+    function stickyMarkup(item) {
+      const status = stickyStatus(item);
+      const task = String(item.task_id || '');
+      const plan = present(item.plan_head) ? `${esc(item.plan_head)}${item.plan_size ? ` / ${number(item.plan_size)} 渠道` : ''}` : '未回报';
+      const warning = item.warning === 'target_not_plan_head'
+        ? `<div class="subtext error-text">期望上游 ${esc(item.target)} 不是该模型计划首位 ${esc(item.plan_head)}；网关只会钉计划首位，请改用首位为 ${esc(item.target)} 的模型或清空期望上游</div>`
+        : present(item.rotated_from) ? `<div class="subtext">上次落在 ${esc(item.rotated_from)}，已换新会话回到 ${shown(item.target, '计划首位')} · 累计换 ${number(item.rotations)} 次</div>` : '';
+      return `<div class="model-row"><div class="model-main"><div class="primary-text mono">${shown(item.model)}</div>
+        <div class="subtext">凭据 ${shown(item.credential || item.credential_id)} · 会话 <span class="mono" title="${esc(task)}">${esc(task.slice(0, 8))}…</span> · 本会话 ${number(item.requests)} 次 · 更新 ${formatTime(item.updated)}</div>
+        <div class="subtext">计划首位 ${plan} · 目标 ${shown(item.target, '计划首位')} · 最近实际 ${shown(item.last_provider, '未知')} · 累计预热 ${number(item.warmups || 0)} 次</div>${warning}</div>
+        <div class="row-actions"><span class="badge ${status.cls}">${status.label}</span><button class="button compact reset-sticky" type="button" data-credential="${esc(item.credential_id)}" data-model="${esc(item.model)}">重置</button></div></div>`;
+    }
+    function renderSticky(data) {
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const notes = [];
+      if (data?.mode === 'per_request') notes.push('当前为“每次新会话”：每条请求使用新的 X-Task-Id，不复用、不预热，都从计划首位开始；下列为此前保存的会话');
+      if (data?.mode === 'off') notes.push('当前不发送 X-Task-Id：网关按 API key 使用默认会话（同样会钉住，但无法观测和重置）');
+      if (present(data?.persistence_error)) notes.push(`会话持久化失败：${data.persistence_error}`);
+      $('stickyState').textContent = notes.join('；');
+      $('resetAllSticky').disabled = !items.length;
+      $('stickyList').innerHTML = items.length ? items.map(stickyMarkup).join('') : '<div class="empty">暂无会话 · 首次请求后创建</div>';
+    }
+    async function loadSticky() {
+      try { renderSticky(await api('/sticky')); }
+      catch (error) { $('stickyState').textContent = `会话读取失败：${error.message}`; }
+    }
+    async function resetSticky(query, label) {
+      if (!confirm(`重置${label}？下一次请求会使用新的 X-Task-Id，重新落到计划首位。`)) return;
+      try { const result = await api('/sticky', { method: 'DELETE', query }); toast(`已重置 ${number(result?.deleted ?? 0)} 个会话`); }
+      catch (error) { toast(`重置失败：${error.message}`); }
+      await loadSticky();
+    }
+    $('refreshSticky').addEventListener('click', loadSticky);
+    $('resetAllSticky').addEventListener('click', () => resetSticky(undefined, '全部会话'));
+    $('stickyList').addEventListener('click', (event) => {
+      const button = event.target.closest('.reset-sticky');
+      if (button) resetSticky({ credential_id: button.dataset.credential, model: button.dataset.model }, `「${button.dataset.model}」的会话`);
+    });
     function setTab(name) {
       const logs = name === 'logs';
       $('logsTab').setAttribute('aria-selected', String(logs));
@@ -991,6 +1085,7 @@
         state.editingModelIndex = index;
         $('modelId').value = model.id ?? '';
         $('upstreamId').value = model.upstream_id ?? '';
+        $('stickyProvider').value = model.sticky_provider ?? '';
         $('modelFormTitle').textContent = '编辑模型映射';
         $('saveModel').textContent = '保存映射';
         $('refreshModels').hidden = true;
@@ -1007,12 +1102,14 @@
       const edit = event.target.closest('.edit-model');
       const remove = event.target.closest('.delete-model');
       const test = event.target.closest('.test-model');
-      const button = edit || remove || test;
+      const sticky = event.target.closest('.test-sticky');
+      const button = edit || remove || test || sticky;
       if (!button) return;
       const index = Number(button.dataset.index);
       const model = state.models[index];
       if (!model) return;
       if (test) { await testMappedModel({ ...model }); return; }
+      if (sticky) { await testStickyModel({ ...model }); return; }
       if (edit) {
         openModelDialog(index);
         return;
@@ -1033,7 +1130,8 @@
       if (state.models.some((model, index) => index !== state.editingModelIndex && String(model.id).toLowerCase() === id.toLowerCase())) { $('modelDialogState').textContent = '客户端模型名称已存在'; return; }
       const next = state.models.map((model) => ({ ...model }));
       const original = next[state.editingModelIndex];
-      const item = { id, upstream_id, providers: original?.providers || [] };
+      const sticky_provider = $('stickyProvider').value.trim();
+      const item = { id, upstream_id, providers: original?.providers || [], ...(sticky_provider ? { sticky_provider } : {}) };
       if (state.editingModelIndex < 0) next.push(item); else next[state.editingModelIndex] = item;
       state.modelBusy = true;
       $('saveModel').disabled = true;
@@ -1047,14 +1145,15 @@
       event.preventDefault();
       const timeout_seconds = Number($('timeoutSeconds').value);
       const log_retention = Number($('logRetention').value);
-      if (!Number.isInteger(timeout_seconds) || timeout_seconds < 10 || timeout_seconds > 1800 || !Number.isInteger(log_retention) || log_retention < 50 || log_retention > 10000) {
-        $('settingsState').textContent = '超时需为 10–1800 秒，日志保留需为 50–10000 条';
+      const sticky_warmup_attempts = Number($('stickyWarmup').value);
+      if (!Number.isInteger(timeout_seconds) || timeout_seconds < 10 || timeout_seconds > 1800 || !Number.isInteger(log_retention) || log_retention < 50 || log_retention > 99999999 || !Number.isInteger(sticky_warmup_attempts) || sticky_warmup_attempts < 0 || sticky_warmup_attempts > 20) {
+        $('settingsState').textContent = '超时需为 10–1800 秒，日志保留需为 50–99999999 条，预热次数需为 0–20 次';
         return;
       }
-      const next = { nonstream_mode: $('nonstreamMode').value, timeout_seconds, log_retention };
+      const next = { nonstream_mode: $('nonstreamMode').value, timeout_seconds, log_retention, sticky_mode: $('stickyMode').value, sticky_warmup_attempts };
       $('saveSettings').disabled = true;
       $('settingsState').textContent = '正在保存…';
-      try { state.config = await api('/config', { method: 'PUT', body: next }); $('settingsState').textContent = '设置已保存'; }
+      try { state.config = await api('/config', { method: 'PUT', body: next }); $('settingsState').textContent = '设置已保存'; loadSticky(); }
       catch (error) { $('settingsState').textContent = `保存失败：${error.message}`; }
       finally { $('saveSettings').disabled = false; }
     });

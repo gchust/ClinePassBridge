@@ -34,13 +34,20 @@ type Service struct {
 	revoked       map[string]bool
 	stopCh        chan struct{}
 	logWriteError string
+	logLines      int
 	usageCache    map[string]*usageCacheEntry
 	usageSlots    chan struct{}
 	modelTests    map[string]bool
+	// stickyMu guards sticky sessions; it is never held while taking mu.
+	stickyMu         sync.Mutex
+	sticky           map[string]*stickySession
+	stickyWriteError string
+	warmupDelay      func(attempt int) time.Duration
+	warmupTimeout    time.Duration
 }
 
 func NewService() *Service {
-	return &Service{cfg: defaultConfig(), creds: map[string]Credential{}, authFiles: map[string]string{}, streams: map[string]struct{}{}, revoked: map[string]bool{}, stopCh: make(chan struct{}), usageCache: map[string]*usageCacheEntry{}, usageSlots: make(chan struct{}, 3)}
+	return &Service{cfg: defaultConfig(), creds: map[string]Credential{}, authFiles: map[string]string{}, streams: map[string]struct{}{}, revoked: map[string]bool{}, stopCh: make(chan struct{}), usageCache: map[string]*usageCacheEntry{}, usageSlots: make(chan struct{}, 3), sticky: map[string]*stickySession{}, warmupDelay: defaultWarmupDelay, warmupTimeout: defaultWarmupTimeout}
 }
 func (s *Service) SetHost(h func(string, any, any) error) { s.mu.Lock(); s.host = h; s.mu.Unlock() }
 func (s *Service) call(method string, in, out any) error {
@@ -101,16 +108,18 @@ func (s *Service) configure(raw json.RawMessage) error {
 		return e
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.cfg = cfg
-	if !s.loaded {
-		if b, e := os.ReadFile(filepath.Join(cfg.DataDir, "requests.json")); e == nil {
-			_ = json.Unmarshal(b, &s.logs)
-		}
+	first := !s.loaded
+	if first {
+		s.logs, s.logLines = loadLogs(cfg.DataDir)
 		s.loaded = true
 	}
 	if len(s.logs) > cfg.LogRetention {
 		s.logs = s.logs[len(s.logs)-cfg.LogRetention:]
+	}
+	s.mu.Unlock()
+	if first {
+		s.loadSticky(cfg.DataDir)
 	}
 	return nil
 }
@@ -308,14 +317,16 @@ func (s *Service) selectedCredential(r ExecutorRequest) (Credential, error) {
 	return c, nil
 }
 func (s *Service) appendLog(entry LogEntry) {
+	s.observeSticky(entry)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry.Error = safeError(errors.New(entry.Error))
+	entry.stickyKey = ""
 	s.logs = append(s.logs, entry)
 	if len(s.logs) > s.cfg.LogRetention {
 		s.logs = s.logs[len(s.logs)-s.cfg.LogRetention:]
 	}
-	s.logWriteError = safeError(atomicJSON(filepath.Join(s.cfg.DataDir, "requests.json"), s.logs))
+	s.logWriteError = safeError(s.persistLogLocked(entry))
 }
 func (s *Service) credentials() []map[string]any {
 	s.mu.RLock()

@@ -137,7 +137,7 @@ func (s *Service) credentialUsage(r ManagementRequest) (credentialUsage, error) 
 }
 
 func (s *Service) usageGET(callbackID string, c Credential, path string, deadline time.Time) (json.RawMessage, error) {
-	up, err := s.openUpstream(map[string]any{"host_callback_id": callbackID, "method": "GET", "url": s.config().BaseURL + path, "headers": headers(c)}, deadline)
+	up, err := s.openUpstream(map[string]any{"host_callback_id": callbackID, "method": "GET", "url": s.config().BaseURL + path, "headers": headers(c, "")}, deadline)
 	if err != nil {
 		return nil, err
 	}
