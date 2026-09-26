@@ -338,8 +338,8 @@
           <div class="panel-head"><div><h2>请求与日志设置</h2><p class="panel-hint">仅影响本插件</p></div></div>
           <form class="form-stack" id="settingsForm">
             <div class="field"><label for="nonstreamMode">非流式处理</label><select class="control" id="nonstreamMode"><option value="native">原生非流式</option><option value="native-fallback">原生优先，必要时聚合流式</option><option value="stream-aggregate">直接聚合流式（推荐）</option></select></div>
-            <div class="field"><label for="stickySession">会话粘滞</label><select class="control" id="stickySession"><option value="on">开启：复用会话钉住计划首位渠道（推荐）</option><option value="off">关闭：每次请求由网关自动路由</option></select></div>
-            <div class="field"><label for="stickyWarmup">新会话预热次数（0 关闭）</label><input class="control" id="stickyWarmup" type="number" min="0" max="20" step="1" required><p class="panel-hint">新会话先发极小请求确认落在目标渠道；落错就换会话重试，最多占用一半请求超时</p></div>
+            <div class="field"><label for="stickyMode">会话粘滞</label><select class="control" id="stickyMode"><option value="reuse">复用会话：钉住计划首位渠道（推荐）</option><option value="per_request">每次新会话：每条请求用新的 X-Task-Id，不钉住</option><option value="off">不发送 X-Task-Id：网关按 API key 用默认会话</option></select></div>
+            <div class="field"><label for="stickyWarmup">新会话预热次数（0 关闭）</label><input class="control" id="stickyWarmup" type="number" min="0" max="20" step="1" required><p class="panel-hint">仅用于“复用会话”：新会话先发极小请求确认落在目标渠道，落错就换会话重试，最多占用一半请求超时</p></div>
             <div class="field"><label for="timeoutSeconds">请求超时（秒）</label><input class="control" id="timeoutSeconds" type="number" min="10" max="1800" step="1" required></div>
             <div class="field"><label for="logRetention">日志保留条数</label><input class="control" id="logRetention" type="number" min="50" max="99999999" step="1" required></div>
             <div class="form-foot"><button class="button primary" id="saveSettings" type="submit">保存设置</button></div>
@@ -900,9 +900,9 @@
       try {
         const [config, models, credentials, sticky] = await Promise.all([api('/config'), api('/models'), api('/credentials'), api('/sticky')]);
         state.config = config || {};
-        $('stickySession').value = config?.sticky_session === false ? 'off' : 'on';
+        $('stickyMode').value = ['reuse', 'per_request', 'off'].includes(config?.sticky_mode) ? config.sticky_mode : 'reuse';
         $('stickyWarmup').value = present(config?.sticky_warmup_attempts) ? config.sticky_warmup_attempts : 10;
-        dropdowns.get('stickySession').sync();
+        dropdowns.get('stickyMode').sync();
         renderSticky(sticky);
         $('nonstreamMode').value = ['native', 'native-fallback', 'stream-aggregate'].includes(config?.nonstream_mode) ? config.nonstream_mode : 'stream-aggregate';
         dropdowns.get('nonstreamMode').sync();
@@ -940,7 +940,8 @@
     function renderSticky(data) {
       const items = Array.isArray(data?.items) ? data.items : [];
       const notes = [];
-      if (data?.enabled === false) notes.push('会话粘滞已关闭，请求不带 X-Task-Id；可在「请求与日志设置」开启');
+      if (data?.mode === 'per_request') notes.push('当前为“每次新会话”：每条请求使用新的 X-Task-Id，不复用、不预热，都从计划首位开始；下列为此前保存的会话');
+      if (data?.mode === 'off') notes.push('当前不发送 X-Task-Id：网关按 API key 使用默认会话（同样会钉住，但无法观测和重置）');
       if (present(data?.persistence_error)) notes.push(`会话持久化失败：${data.persistence_error}`);
       $('stickyState').textContent = notes.join('；');
       $('resetAllSticky').disabled = !items.length;
@@ -1149,7 +1150,7 @@
         $('settingsState').textContent = '超时需为 10–1800 秒，日志保留需为 50–99999999 条，预热次数需为 0–20 次';
         return;
       }
-      const next = { nonstream_mode: $('nonstreamMode').value, timeout_seconds, log_retention, sticky_session: $('stickySession').value !== 'off', sticky_warmup_attempts };
+      const next = { nonstream_mode: $('nonstreamMode').value, timeout_seconds, log_retention, sticky_mode: $('stickyMode').value, sticky_warmup_attempts };
       $('saveSettings').disabled = true;
       $('settingsState').textContent = '正在保存…';
       try { state.config = await api('/config', { method: 'PUT', body: next }); $('settingsState').textContent = '设置已保存'; loadSticky(); }

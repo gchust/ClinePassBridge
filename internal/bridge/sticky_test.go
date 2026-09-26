@@ -155,7 +155,7 @@ func TestStickySessionsAreScopedPerCredentialAndCanBeDisabled(t *testing.T) {
 		t.Fatalf("credentials must not share a task ID: %q, %q", a, b)
 	}
 
-	disabled := stickyService(t, t.TempDir(), deepseekModel+"sticky_session: false\n")
+	disabled := stickyService(t, t.TempDir(), deepseekModel+"sticky_mode: off\n")
 	h = runRequests(t, disabled, routedPlan(routing("", "", "deepseek")))
 	if got := h.headers[0].Get(stickyHeader); got != "" || disabled.logs[0].TaskID != "" {
 		t.Fatalf("disabled sticky session still sent task ID %q", got)
@@ -187,10 +187,10 @@ func TestStickyResetIgnoresInFlightRequestsOfOldSession(t *testing.T) {
 	}
 	result, _ = s.Handle("management.handle", jsonBytes(ManagementRequest{Method: "GET", Path: apiBase + "/sticky"}))
 	var body struct {
-		Enabled bool            `json:"enabled"`
-		Items   []stickySession `json:"items"`
+		Mode  string          `json:"mode"`
+		Items []stickySession `json:"items"`
 	}
-	if err := json.Unmarshal(result.(ManagementResponse).Body, &body); err != nil || !body.Enabled || len(body.Items) != 1 || body.Items[0].TaskID != fresh {
+	if err := json.Unmarshal(result.(ManagementResponse).Body, &body); err != nil || body.Mode != stickyReuse || len(body.Items) != 1 || body.Items[0].TaskID != fresh {
 		t.Fatalf("sticky state endpoint: %v %s", err, result.(ManagementResponse).Body)
 	}
 }
@@ -420,10 +420,10 @@ func TestStickyTestEndpointRunsWarmupAndConfirmation(t *testing.T) {
 		t.Fatalf("an unreachable target must be reported without churning: %d %#v", status, body)
 	}
 
-	disabled := stickyService(t, t.TempDir(), warmModel+"sticky_session: false\n")
+	disabled := stickyService(t, t.TempDir(), warmModel+"sticky_mode: per_request\n")
 	disabled.creds["c1"] = Credential{Type: Provider, ID: "c1", Label: "main", APIKey: "test-key"}
 	if status, _ = stickyTest(t, disabled); status != 400 {
-		t.Fatalf("sticky test with sticky sessions off should be rejected, got %d", status)
+		t.Fatalf("sticky test outside reuse mode should be rejected, got %d", status)
 	}
 }
 
@@ -466,5 +466,35 @@ func TestStalledWarmupTimesOutAndRetriesSameSession(t *testing.T) {
 	}
 	if tasks := taskIDs(h); len(tasks) != 3 || tasks[0] != tasks[1] || tasks[1] != tasks[2] {
 		t.Fatalf("a timed-out warm-up must retry the same unserved task ID: %#v", tasks)
+	}
+}
+
+func TestPerRequestModeSendsFreshTaskIDsWithoutWarmups(t *testing.T) {
+	s := stickyService(t, t.TempDir(), warmModel+"sticky_mode: per_request\n")
+	h := runRequests(t, s, routedPlan(routing("no_pin", "", "deepseek")), routedPlan(routing("no_pin", "", "deepseek")))
+	tasks := taskIDs(h)
+	if len(tasks) != 2 || tasks[0] == "" || tasks[1] == "" || tasks[0] == tasks[1] {
+		t.Fatalf("per_request mode must send a new task ID on every request and skip warm-ups: %#v", tasks)
+	}
+	if s.logs[1].TaskID != tasks[1] || s.logs[1].Affinity != "no_pin" || len(s.logs[1].Attempts) != 1 {
+		t.Fatalf("logs should still record the task ID and affinity: %#v", s.logs[1])
+	}
+	s.stickyMu.Lock()
+	defer s.stickyMu.Unlock()
+	if len(s.sticky) != 0 {
+		t.Fatalf("per_request mode must not store sessions: %#v", s.sticky)
+	}
+}
+
+func TestStickyModeValidation(t *testing.T) {
+	cfg := defaultConfig()
+	if cfg.StickyMode != stickyReuse {
+		t.Fatalf("default sticky mode = %q", cfg.StickyMode)
+	}
+	for mode, valid := range map[string]bool{"": true, stickyReuse: true, stickyPerRequest: true, stickyOff: true, "always": false} {
+		cfg.StickyMode = mode
+		if err := cfg.validate(); (err == nil) != valid {
+			t.Fatalf("sticky_mode %q: validate() = %v", mode, err)
+		}
 	}
 }

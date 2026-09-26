@@ -18,6 +18,12 @@ import (
 const stickyHeader = "X-Task-Id"
 const stickyFile = "sticky.json"
 
+const (
+	stickyReuse      = "reuse"
+	stickyPerRequest = "per_request"
+	stickyOff        = "off"
+)
+
 type stickySession struct {
 	CredentialID   string    `json:"credential_id"`
 	Credential     string    `json:"credential"`
@@ -97,7 +103,8 @@ func (s *Service) stickySessionLocked(c Credential, upstream string) *stickySess
 }
 
 // stickyTaskID returns the task ID to send for this credential and upstream
-// model, creating a session on first use. It returns "" when disabled.
+// model, creating a session on first use. It returns "" when disabled, and a
+// throwaway ID in per_request mode, where nothing is reused or warmed.
 //
 // A task ID nobody has used yet is warmed first: the gateway pins whichever
 // channel serves a session's first request, so a tiny request goes out before
@@ -105,8 +112,11 @@ func (s *Service) stickySessionLocked(c Credential, upstream string) *stickySess
 // The real request then streams on a session already served by the target.
 func (s *Service) stickyTaskID(r *ExecutorRequest, c Credential, upstream string) string {
 	cfg := s.config()
-	if !cfg.StickySession || c.ID == "" {
+	if cfg.StickyMode == stickyOff || c.ID == "" {
 		return ""
+	}
+	if cfg.StickyMode == stickyPerRequest {
+		return id()
 	}
 	s.stickyMu.Lock()
 	session := s.stickySessionLocked(c, upstream)
@@ -341,7 +351,7 @@ func (s *Service) stickyResponse() (any, error) {
 		}
 	}
 	s.mu.RUnlock()
-	return managementJSON(200, map[string]any{"enabled": s.config().StickySession, "items": sessions, "persistence_error": writeError})
+	return managementJSON(200, map[string]any{"mode": s.config().StickyMode, "items": sessions, "persistence_error": writeError})
 }
 
 // planOrder reads the gateway's execution order, e.g. "Total execution order:
@@ -393,8 +403,8 @@ func (s *Service) testSticky(r ManagementRequest) (any, error) {
 		return managementJSON(400, map[string]any{"error": "请选择模型与测试凭据"})
 	}
 	cfg := s.config()
-	if !cfg.StickySession {
-		return managementJSON(400, map[string]any{"error": "会话粘滞已关闭，请先在设置中开启"})
+	if cfg.StickyMode != stickyReuse {
+		return managementJSON(400, map[string]any{"error": "粘滞测试仅适用于“复用会话”模式，请先在设置中切换"})
 	}
 	upstream, err := s.resolveModel(in.Model)
 	if err != nil {

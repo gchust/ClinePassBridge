@@ -93,7 +93,10 @@ type Config struct {
 	TimeoutSeconds   int     `json:"timeout_seconds" yaml:"timeout_seconds"`
 	LogRetention     int     `json:"log_retention" yaml:"log_retention"`
 	MaxResponseBytes int     `json:"max_response_bytes" yaml:"max_response_bytes"`
-	StickySession    bool    `json:"sticky_session" yaml:"sticky_session"`
+	// StickyMode is "reuse" (one task ID per credential and model), "per_request"
+	// (a new task ID on every request, so nothing is pinned) or "off" (no header;
+	// the gateway then falls back to its own per-key default session).
+	StickyMode string `json:"sticky_mode" yaml:"sticky_mode"`
 	// StickyWarmupAttempts bounds the warm-ups for a fresh session; 0 disables them.
 	StickyWarmupAttempts int `json:"sticky_warmup_attempts" yaml:"sticky_warmup_attempts"`
 }
@@ -102,7 +105,7 @@ const minLogRetention, maxLogRetention = 50, 99999999
 const maxStickyWarmupAttempts = 20
 
 func defaultConfig() Config {
-	return Config{DataDir: "plugins/clinepassbridge-data", BaseURL: "https://api.cline.bot/api/v1", Models: []Model{}, NonstreamMode: "stream-aggregate", TimeoutSeconds: 180, LogRetention: 1000, MaxResponseBytes: 16 << 20, StickySession: true, StickyWarmupAttempts: 10}
+	return Config{DataDir: "plugins/clinepassbridge-data", BaseURL: "https://api.cline.bot/api/v1", Models: []Model{}, NonstreamMode: "stream-aggregate", TimeoutSeconds: 180, LogRetention: 1000, MaxResponseBytes: 16 << 20, StickyMode: stickyReuse, StickyWarmupAttempts: 10}
 }
 func (c *Config) validate() error {
 	u, e := url.Parse(c.BaseURL)
@@ -114,6 +117,12 @@ func (c *Config) validate() error {
 	}
 	if c.LogRetention < minLogRetention || c.LogRetention > maxLogRetention {
 		return fail(400, fmt.Sprintf("log_retention must be between %d and %d", minLogRetention, maxLogRetention))
+	}
+	if c.StickyMode == "" {
+		c.StickyMode = stickyReuse
+	}
+	if c.StickyMode != stickyReuse && c.StickyMode != stickyPerRequest && c.StickyMode != stickyOff {
+		return fail(400, "sticky_mode must be reuse, per_request or off")
 	}
 	if c.StickyWarmupAttempts < 0 || c.StickyWarmupAttempts > maxStickyWarmupAttempts {
 		return fail(400, fmt.Sprintf("sticky_warmup_attempts must be between 0 and %d", maxStickyWarmupAttempts))
