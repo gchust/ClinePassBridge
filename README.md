@@ -1,5 +1,10 @@
 # ClinePassBridge
 
+> 本仓库的 fork 维护分支为 `custom/main`，`main` 用于镜像上游。Fork 默认
+> 仅发布 macOS amd64/arm64，版本格式为 `vX.Y.Z-fork.N`。安装本 fork 请使用
+> Release 附带的 `registry.json`；下文的官方插件市场入口仍对应上游。
+> 分支、同步与发布规则见 [Fork 维护说明](docs/fork-maintenance.md)。
+
 ClinePassBridge 是 [CLIProxyAPI (CPA)](https://github.com/router-for-me/CLIProxyAPI) 的 Cline Pass 插件。它把 Cline Pass API key 接入 CPA 的凭据系统，提供模型别名映射、Chat Completions 协议适配、真实 SSE 流及请求观测等功能。
 
 ## 功能
@@ -71,7 +76,7 @@ docker build --platform linux/amd64 -f Dockerfile.build --output type=local,dest
 
 构建阶段使用 `golang:1.26-bookworm`，并以 `CGO_ENABLED=1`、`-buildmode=c-shared` 编译 `./cmd/passbridge`。输出 `dist/clinepassbridge.so`，目标为 Debian 12 兼容的 Linux amd64 动态库。本地 Windows 无需安装 C 编译器，构建交给 Docker。
 
-[构建工作流](.github/workflows/release.yml) 在普通 push 和 PR 中分别测试并构建五个平台：Linux amd64 使用 Debian 12 Docker 构建，Linux arm64 在 `ubuntu-24.04-arm` 上使用同一 Go 镜像；macOS amd64/arm64 使用原生 `macos-15-intel`/`macos-15`；Windows amd64 使用 `windows-latest` 和 MSYS2 UCRT64 GCC。只有推送与源码版本一致的 `v<version>` 标签且五个作业全部通过时，工作流才汇总发布五个 ZIP 与统一的 `checksums.txt`。资产命名遵循 [CPA 官方插件市场规范](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store#release-requirements)。
+上游的[构建工作流](.github/workflows/release.yml) 覆盖 Linux、macOS 和 Windows；它在本 fork 中禁用。本 fork 的 [macOS 检查](.github/workflows/macos-ci.yml) 使用 `macos-15-intel`/`macos-15` 原生测试并构建 amd64/arm64；PR 合并到 `custom/main` 后，[发布工作流](.github/workflows/release-on-custom-merge.yml) 生成两个 ZIP、`checksums.txt` 和 fork 专用 `registry.json`。资产命名与 ZIP 布局沿用 [CPA 官方插件市场规范](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store#release-requirements)。
 
 市场 registry 使用 CPA v7.3.12 的 `schema_version: 1`、`github-release` 安装类型。它是 CPA 商店入口，不是一个可直接安装的 `.so` URL；若使用自己的市场源，也必须托管符合该 schema 的 JSON registry，并提供对应 GitHub Release 资产。
 
