@@ -70,6 +70,8 @@ Cline 网关会静默忽略请求体里的钉渠道字段（`provider.only / ord
 
 - 新 task ID 的第 1 次请求落在该模型执行计划的首位，`routing.affinity.outcome` 为 `no_pin`；
 - 同一 task ID 的第 2 次请求起，网关回报 `confirmed` 并在服务端记住渠道，与请求体无关。
+- 钉住按（会话，模型）分别记录：同一会话换一个模型，会重新从 `no_pin` 开始。
+- 不带 `X-Task-Id` 时，网关按 API key 派生一个默认会话（`sess-…`，与 prompt、User-Agent 无关），同样会钉住，但客户端无法观测，也无法重置。
 
 开启会话粘滞后，插件为每个（上游模型，凭据）保存一个 task ID 并持续复用，重启后仍沿用（网关记忆仍在）。每次响应后按网关元数据判断：
 
