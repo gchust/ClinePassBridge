@@ -26,6 +26,7 @@ type fakeHost struct {
 	plans          []hostPlan
 	opened         []bool
 	callbackIDs    []string
+	headers        []http.Header
 	streams        map[string][]readChunk
 	reads          map[string]int
 	upstreamClosed []string
@@ -66,6 +67,11 @@ func (h *fakeHost) call(method string, payload, out any) error {
 		}
 		h.opened = append(h.opened, parsed.Stream)
 		h.callbackIDs = append(h.callbackIDs, str(request["host_callback_id"]))
+		if header, ok := request["headers"].(http.Header); ok {
+			h.headers = append(h.headers, header.Clone())
+		} else {
+			h.headers = append(h.headers, nil)
+		}
 		plan := h.plans[len(h.opened)-1]
 		streamID := fmt.Sprintf("upstream-%d", len(h.opened))
 		h.streams[streamID] = plan.chunks

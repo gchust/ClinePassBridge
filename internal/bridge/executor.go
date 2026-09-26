@@ -22,8 +22,8 @@ type readChunk struct {
 	Done    bool   `json:"done"`
 }
 
-func (s *Service) prepare(r ExecutorRequest) (map[string]any, Credential, string, error) {
-	c, e := s.selectedCredential(r)
+func (s *Service) prepare(r *ExecutorRequest) (map[string]any, Credential, string, error) {
+	c, e := s.selectedCredential(*r)
 	if e != nil {
 		return nil, c, "", e
 	}
@@ -46,10 +46,15 @@ func (s *Service) prepare(r ExecutorRequest) (map[string]any, Credential, string
 	if p := object(object(j["providerOptions"])["gateway"]); len(p) > 0 {
 		return nil, c, "", fail(400, "providerOptions.gateway pinning is currently ignored by Cline; use automatic routing")
 	}
+	r.taskID = s.stickyTaskID(c, up)
 	return j, c, up, nil
 }
-func headers(c Credential) http.Header {
-	return http.Header{"Authorization": []string{"Bearer " + c.APIKey}, "Content-Type": []string{"application/json"}, "User-Agent": []string{"ClinePassBridge/" + Version}}
+func headers(c Credential, taskID string) http.Header {
+	h := http.Header{"Authorization": []string{"Bearer " + c.APIKey}, "Content-Type": []string{"application/json"}, "User-Agent": []string{"ClinePassBridge/" + Version}}
+	if taskID != "" {
+		h.Set(stickyHeader, taskID)
+	}
+	return h
 }
 func (s *Service) request(r ExecutorRequest, c Credential, j map[string]any, stream bool, diagnostics ...*modelTestDiagnostics) (upstreamStream, error) {
 	j["stream"] = stream
@@ -63,7 +68,7 @@ func (s *Service) request(r ExecutorRequest, c Credential, j map[string]any, str
 	} else {
 		delete(j, "stream_options")
 	}
-	return s.openUpstream(map[string]any{"host_callback_id": r.HostCallbackID, "method": "POST", "url": s.config().BaseURL + "/chat/completions", "headers": headers(c), "body": jsonBytes(j)}, r.deadline, diagnostics...)
+	return s.openUpstream(map[string]any{"host_callback_id": r.HostCallbackID, "method": "POST", "url": s.config().BaseURL + "/chat/completions", "headers": headers(c, r.taskID), "body": jsonBytes(j)}, r.deadline, diagnostics...)
 }
 
 func (s *Service) openUpstream(payload any, deadline time.Time, diagnostics ...*modelTestDiagnostics) (upstreamStream, error) {
@@ -195,7 +200,11 @@ func (s *Service) readJSON(up upstreamStream) ([]byte, error) {
 	return b.Bytes(), nil
 }
 func (s *Service) newLog(r ExecutorRequest, c Credential, up string) LogEntry {
-	return LogEntry{ID: id(), Time: time.Now().UTC(), Model: r.Model, UpstreamModel: up, Stream: r.Stream, Provider: "unknown", ProviderSource: "not_reported", Credential: c.Label, Attempts: []Attempt{}}
+	entry := LogEntry{ID: id(), Time: time.Now().UTC(), Model: r.Model, UpstreamModel: up, Stream: r.Stream, Provider: "unknown", ProviderSource: "not_reported", Credential: c.Label, Attempts: []Attempt{}}
+	if r.taskID != "" {
+		entry.TaskID, entry.stickyKey = r.taskID, stickyKey(c.ID, up)
+	}
+	return entry
 }
 func (s *Service) execute(r ExecutorRequest) (any, error) {
 	if err := s.begin(); err != nil {
@@ -204,7 +213,7 @@ func (s *Service) execute(r ExecutorRequest) (any, error) {
 	defer s.active.Done()
 	r.Stream = false
 	r.deadline = time.Now().Add(time.Duration(s.config().TimeoutSeconds) * time.Second)
-	j, c, up, e := s.prepare(r)
+	j, c, up, e := s.prepare(&r)
 	entry := s.newLog(r, c, up)
 	start := time.Now()
 	defer func() {
@@ -326,7 +335,7 @@ func (s *Service) executeStream(r ExecutorRequest) (any, error) {
 	}
 	r.Stream = true
 	r.deadline = time.Now().Add(time.Duration(s.config().TimeoutSeconds) * time.Second)
-	j, c, up, e := s.prepare(r)
+	j, c, up, e := s.prepare(&r)
 	entry := s.newLog(r, c, up)
 	start := time.Now()
 	failEarly := func(err error) (any, error) {

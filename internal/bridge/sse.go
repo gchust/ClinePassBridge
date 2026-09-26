@@ -304,6 +304,9 @@ func observeMetadata(j map[string]any, entry *LogEntry, attempt *Attempt) {
 		pm := object(root.v["provider_metadata"])
 		routing := object(object(pm["gateway"])["routing"])
 		apply(str(routing["finalProvider"]), root.path+"provider_metadata.gateway.routing.finalProvider")
+		if routing != nil {
+			observeRouting(routing, entry)
+		}
 	}
 	if u := object(j["usage"]); u != nil {
 		entry.PromptTokens = number(u["prompt_tokens"])

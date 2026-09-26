@@ -83,7 +83,7 @@ func (s *Service) testModel(r ManagementRequest) (any, error) {
 		deadline: start.Add(time.Duration(cfg.TimeoutSeconds) * time.Second),
 		Payload:  []byte(`{"messages":[{"role":"user","content":"Reply with OK only."}],"max_tokens":64}`),
 	}
-	j, credential, upstream, err := s.prepare(req)
+	j, credential, upstream, err := s.prepare(&req)
 	if err == nil && upstream != in.UpstreamID {
 		err = fail(409, "模型映射已变更，请刷新后重试")
 	}
