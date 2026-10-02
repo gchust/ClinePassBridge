@@ -604,6 +604,11 @@
     function datum(label, value, fallback = '未记录') { return `<div><div class="datum-label">${label}</div><div class="datum-value">${shown(value, fallback)}</div></div>`; }
     function logMarkup(log) {
       const status = statusInfo(log.status);
+	  const teamLimited = log.error_kind === 'upstream_team_rate_limited';
+	  const limited = teamLimited || log.error_kind === 'upstream_rate_limited';
+	  const remaining = Math.max(0, Math.ceil((Date.parse(log.retry_at) - Date.now()) / 1000));
+	  const limitName = teamLimited ? '上游团队限流' : '请求限流';
+	  const limitLabel = limited ? (remaining > 0 ? `${limitName}，${remaining} 秒后可重试` : limitName) : '';
       const actual = shown(actualProvider(log.provider), '未知');
       const attempts = Array.isArray(log.attempts) ? log.attempts : [];
       const attemptMarkup = attempts.length ? attempts.map((attempt, index) => {
@@ -613,7 +618,7 @@
       return `<details class="log-entry" data-id="${esc(log.id)}"><summary class="row-main">
         <div class="cell"><span class="cell-label">时间 / 请求</span><div class="primary-text mono">${formatTime(log.time)}</div><div class="subtext mono">${shown(log.id, '无 ID')}</div></div>
         <div class="cell"><span class="cell-label">客户端模型 / 上游</span><div class="primary-text mono">${shown(log.model)}</div><div class="subtext mono">${shown(log.upstream_model)}</div></div>
-        <div class="cell"><span class="cell-label">结果</span><span class="badge ${status.cls}">${status.label}</span><div class="subtext">${log.stream === true ? '流式' : log.stream === false ? '非流式' : '模式未知'}</div></div>
+        <div class="cell"><span class="cell-label">结果</span><span class="badge ${status.cls}" title="${esc(limitLabel)}">${limited ? limitName : log.error_kind === 'upstream_quota_exhausted' ? '额度耗尽' : status.label}</span><div class="subtext">${log.upstream_skipped ? '本地退避' : log.stream === true ? '流式' : log.stream === false ? '非流式' : '模式未知'}</div></div>
         <div class="cell"><span class="cell-label">实际上游</span><div class="primary-text">${actual}</div></div>
         <div class="cell"><span class="cell-label">延时 / 首字</span><div>${ms(log.duration_ms)}</div><div class="subtext">首字 ${ttft(log)}</div></div>
         <div class="cell"><span class="cell-label">用量 / 尝试</span><div>${number(log.prompt_tokens)} / ${number(log.completion_tokens)}</div><div class="subtext">缓存 ${number(log.cached_tokens)} · ${attempts.length} 次</div></div>
@@ -626,6 +631,7 @@
             ${datum('输入 tokens', number(log.prompt_tokens), '--')}
             ${datum('输出 tokens', number(log.completion_tokens), '--')}
             ${datum('缓存 tokens', number(log.cached_tokens), '--')}
+			${limited ? datum('重试状态', limitLabel) + datum('限流范围', log.rate_limit_scope === 'upstream_team' ? '上游团队' : '当前凭据 / 模型') : ''}
           </div>
           ${present(log.error) ? `<div class="attempts"><div class="datum-label">请求错误</div><div class="error-text">${esc(log.error)}</div></div>` : ''}
           <div class="attempts"><strong>尝试明细 · ${attempts.length}</strong>${attemptMarkup}</div>

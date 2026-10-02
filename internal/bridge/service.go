@@ -19,6 +19,7 @@ import (
 var secretPattern = regexp.MustCompile(`(?i)(?:bearer\s+|sk[-_])[a-z0-9_.-]+`)
 
 type Service struct {
+	rateLimits          rateLimiter
 	credentialMu        sync.Mutex
 	authFiles           map[string]string
 	mu                  sync.RWMutex
@@ -235,7 +236,11 @@ func (s *Service) resolveModel(model string) (string, error) {
 	return "", fail(400, "model is not enabled in ClinePassBridge: "+model)
 }
 func authData(c Credential, filename string) any {
-	return map[string]any{"Provider": Provider, "ID": c.ID, "FileName": filename, "Label": c.Label, "Disabled": c.Disabled, "ProxyURL": c.ProxyURL, "StorageJSON": jsonBytes(c), "Metadata": map[string]any{"type": Provider, "request_scoped_errors": []any{map[string]any{"status": 500, "match": []string{"empty response content"}, "action": "stop"}}}, "Attributes": map[string]string{"auth_kind": "api_key"}}
+	c.RequestScopedErrors = requestErrorRules()
+	// Metadata and stored auth JSON must agree, including after hot reload.
+	var rules []any
+	_ = json.Unmarshal(jsonBytes(c.RequestScopedErrors), &rules)
+	return map[string]any{"Provider": Provider, "ID": c.ID, "FileName": filename, "Label": c.Label, "Disabled": c.Disabled, "ProxyURL": c.ProxyURL, "StorageJSON": jsonBytes(c), "Metadata": map[string]any{"type": Provider, "request_scoped_errors": rules}, "Attributes": map[string]string{"auth_kind": "api_key"}}
 }
 func (s *Service) parseAuth(raw json.RawMessage) (any, error) {
 	var r struct {

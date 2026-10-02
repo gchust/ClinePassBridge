@@ -228,6 +228,9 @@ func (s *Service) recordEstimateLocked(e LogEntry) {
 	}
 	a.Revision++
 	s.estimateActivity[key] = a
+	if e.UpstreamSkipped {
+		return
+	}
 	if s.estimates.Keys == nil {
 		s.estimates.Keys = map[string]*estimateKey{}
 		s.estimates.Accounts = map[string]*estimateAccount{}

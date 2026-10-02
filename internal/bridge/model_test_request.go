@@ -94,6 +94,10 @@ func (s *Service) testModel(r ManagementRequest) (any, error) {
 	if err == nil && strings.TrimSpace(credential.ProxyURL) != "" {
 		err = fail(400, "此 CPA 管理接口暂不支持凭据独立代理的模型测试，请选择使用全局代理的凭据")
 	}
+	var lease *rateLease
+	if err == nil {
+		lease, err = s.rateLimits.acquire(credential, upstream)
+	}
 	if err == nil {
 		var stream upstreamStream
 		stream, err = s.request(req, credential, j, true, diagnostics)
@@ -106,6 +110,8 @@ func (s *Service) testModel(r ManagementRequest) (any, error) {
 		}
 	}
 	duration := time.Since(start).Milliseconds()
+	lease.finish(err)
+	logErrorDetails(&entry, &attempt, err)
 	detail := ""
 	if err != nil {
 		detail = err.Error()

@@ -65,6 +65,18 @@ plugins:
 
 CPA v7.3.12 的 Chat Completions 流式接口由宿主封装 SSE，插件提交原始 JSON 并由宿主发送结束标记。标准 `/v1/messages` 路由的 Claude 转换器要求 SSE 输入，插件依据宿主传入的 `request_path` 适配；未携带此元数据的内部 Claude 调用尚未覆盖。
 
+上游正常关闭连接、所有输出均有非空 `finish_reason` 且工具调用参数完整时，插件兼容缺少 `[DONE]` 的流；Responses 接口由 CPA 完成协议转换与结束事件。半截 SSE、未完成的输出及传输错误仍报错，已输出的请求不自动重试。请求日志的 `stream_end` 可区分正常标记 `done`、完成后的 EOF `eof_after_finish` 和不完整 EOF；缺少结束信号的错误还会记录输出是否开始、choice 是否全部结束，便于与 Cline 限流或真实中断区分。
+
+## 上游团队限流
+
+上游团队/区域的输入 token 每分钟额度触顶时，插件将 HTTP200 中的 SSE 限流错误识别为 **429 / `upstream_team_rate_limited`**，错误文字带 `[clinepassbridge:team_tpm_limit]`，管理页显示“上游团队限流”。普通请求频率限制保留 `upstream_rate_limited`，套餐额度耗尽单独记录 `upstream_quota_exhausted`；这三类不混为账号失效。
+
+流式调用会在首次实际输出前暂存少量角色/元数据帧，遇到团队限流时通过结构化错误返回宿主。仅该专用标识匹配 CPA 的请求级 `stop` 规则，跳过本次错误造成的凭据冷却并停止宿主继续尝试。普通429、认证失败及套餐耗尽仍沿用宿主原有策略；已有冷却也不会被这条规则清除。此链路的集成验证基准为 CPA v8.0.4。
+
+插件按凭据和真实上游模型维护内存中的短期退避，同模型多个别名共用窗口。优先读取 `Retry-After` 或已知错误中的 `Retry after Ns`，缺失时等待60秒；窗口内直接返回明确的团队限流，不再访问上游，也不新增未知消费。到期仅放行一个恢复探测；探测在输出前取消或失败时，继续保留短暂退避。普通429不会开启这套团队限流窗口。插件重载后窗口重建，后续请求将重新探测上游。
+
+请求日志通过 `error_kind`、`upstream_http_status`、`upstream_error_status`、`retry_at`、`rate_limit_scope` 和 `upstream_skipped` 分别记录错误类别、外层/内层状态、重试时间及本地拦截。第一版不自动重放模型请求；开始输出后的错误仍通过 CPA 现有流错误接口传递，完整状态传播需要宿主支持结构化流错误。
+
 ## 从源码构建
 
 项目使用 Go 1.26、标准 C ABI 和 `gopkg.in/yaml.v3`。在仓库根目录执行：

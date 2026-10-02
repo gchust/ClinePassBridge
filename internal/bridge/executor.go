@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -190,7 +191,7 @@ func (s *Service) readJSON(up upstreamStream) ([]byte, error) {
 	}
 	if up.StatusCode < 200 || up.StatusCode >= 300 {
 		j, _ := decodeObject(b.Bytes())
-		return nil, fail(up.StatusCode, errorMessage(j))
+		return nil, classifyUpstreamError(up.StatusCode, up.Headers, j, time.Now())
 	}
 	return b.Bytes(), nil
 }
@@ -211,11 +212,18 @@ func (s *Service) execute(r ExecutorRequest) (any, error) {
 		entry.DurationMS = time.Since(start).Milliseconds()
 		entry.Status = statusOf(e)
 		entry.Error = safeError(e)
+		logErrorDetails(&entry, nil, e)
 		s.appendLog(entry)
 	}()
 	if e != nil {
 		return nil, e
 	}
+	var lease *rateLease
+	lease, e = s.rateLimits.acquire(c, up)
+	if e != nil {
+		return nil, e
+	}
+	defer func() { lease.finish(e) }()
 	cfg := s.config()
 	wantStream := cfg.NonstreamMode == "stream-aggregate"
 	var body []byte
@@ -230,7 +238,7 @@ func (s *Service) execute(r ExecutorRequest) (any, error) {
 		if e == nil {
 			if wantStream {
 				var cp *completion
-				cp, e = s.consumeSSE(us, r.Model, &entry, &attempt, start, nil)
+				cp, e = s.consumeSSE(us, r.Model, &entry, &attempt, start, nil, number(j["n"]))
 				if e == nil {
 					body, e = cp.result(r.Model)
 				}
@@ -239,7 +247,12 @@ func (s *Service) execute(r ExecutorRequest) (any, error) {
 				raw, e = s.readJSON(us)
 				if e == nil {
 					var o map[string]any
-					o, e = unwrap(raw)
+					root, _ := decodeObject(raw)
+					if root["error"] != nil || root["success"] == false {
+						e = classifyUpstreamError(us.StatusCode, us.Headers, root, time.Now(), 500)
+					} else {
+						o, e = unwrap(raw)
+					}
 					if e == nil {
 						observeMetadata(o, &entry, &attempt)
 						o["model"] = r.Model
@@ -250,6 +263,7 @@ func (s *Service) execute(r ExecutorRequest) (any, error) {
 		}
 		attempt.Status = statusOf(e)
 		attempt.Error = safeError(e)
+		logErrorDetails(&entry, &attempt, e)
 		attempt.DurationMS = time.Since(t).Milliseconds()
 		entry.Attempts = append(entry.Attempts, attempt)
 		if e == nil {
@@ -266,7 +280,7 @@ func (s *Service) execute(r ExecutorRequest) (any, error) {
 	}
 	return Response{Payload: body, Headers: http.Header{"Content-Type": []string{"application/json"}}}, nil
 }
-func (s *Service) consumeSSE(us upstreamStream, model string, entry *LogEntry, attempt *Attempt, start time.Time, emit func([]byte) error) (*completion, error) {
+func (s *Service) consumeSSE(us upstreamStream, model string, entry *LogEntry, attempt *Attempt, start time.Time, emit func([]byte) error, expectedChoices ...int64) (*completion, error) {
 	if us.StatusCode < 200 || us.StatusCode >= 300 {
 		_, e := s.readJSON(us)
 		return nil, e
@@ -279,6 +293,9 @@ func (s *Service) consumeSSE(us upstreamStream, model string, entry *LogEntry, a
 		return nil, fail(502, "Cline returned non-SSE content for a streaming request")
 	}
 	cp := newCompletion()
+	if len(expectedChoices) > 0 && expectedChoices[0] > 0 {
+		cp.expectedChoices = expectedChoices[0]
+	}
 	decoder := SSEDecoder{max: s.config().MaxResponseBytes}
 	e := s.read(us, func(b []byte) error {
 		return decoder.Feed(b, func(payload []byte, event string) error {
@@ -287,6 +304,7 @@ func (s *Service) consumeSSE(us upstreamStream, model string, entry *LogEntry, a
 				if !cp.allFinished() {
 					return fail(502, "upstream stream ended without finish_reason")
 				}
+				entry.StreamEnd = "done"
 				// CPA owns the downstream SSE envelope and terminal marker.
 				return errStreamDone
 			}
@@ -295,7 +313,7 @@ func (s *Service) consumeSSE(us upstreamStream, model string, entry *LogEntry, a
 				return err
 			}
 			if j["error"] != nil || event == "error" || j["success"] == false {
-				return fail(502, errorMessage(j))
+				return classifyUpstreamError(us.StatusCode, us.Headers, j, time.Now())
 			}
 			observeMetadata(j, entry, attempt)
 			cp.observe(j)
@@ -314,8 +332,14 @@ func (s *Service) consumeSSE(us upstreamStream, model string, entry *LogEntry, a
 	}
 	if e == nil && !cp.done {
 		e = decoder.End()
-		if e == nil {
-			e = fail(502, "upstream stream closed before [DONE]")
+		if e != nil {
+			entry.StreamEnd = "eof_incomplete_frame"
+		} else if cp.completeAtEOF() {
+			cp.done = true
+			entry.StreamEnd = "eof_after_finish"
+		} else {
+			entry.StreamEnd = "eof_incomplete_completion"
+			e = fail(502, fmt.Sprintf("upstream stream closed before [DONE] (choices=%d/%d, finished=%t, output=%t)", len(cp.choices), cp.expectedChoices, cp.allFinished(), cp.hasOutput))
 		}
 	}
 	return cp, e
@@ -329,12 +353,16 @@ func (s *Service) executeStream(r ExecutorRequest) (any, error) {
 	j, c, up, e := s.prepare(r)
 	entry := s.newLog(r, c, up)
 	start := time.Now()
+	var lease *rateLease
 	failEarly := func(err error) (any, error) {
-		s.active.Done()
+		defer s.active.Done()
+		lease.finish(err)
 		entry.Status = statusOf(err)
 		entry.Error = safeError(err)
 		entry.DurationMS = time.Since(start).Milliseconds()
-		entry.Attempts = append(entry.Attempts, Attempt{Status: entry.Status, Error: entry.Error, Mode: "stream", Provider: "unknown", DurationMS: entry.DurationMS})
+		attempt := Attempt{Status: entry.Status, Error: entry.Error, Mode: "stream", Provider: "unknown", DurationMS: entry.DurationMS}
+		logErrorDetails(&entry, &attempt, err)
+		entry.Attempts = append(entry.Attempts, attempt)
 		s.appendLog(entry)
 		return nil, err
 	}
@@ -344,6 +372,10 @@ func (s *Service) executeStream(r ExecutorRequest) (any, error) {
 	if r.StreamID == "" {
 		return failEarly(fail(500, "host provided no output stream identifier"))
 	}
+	lease, e = s.rateLimits.acquire(c, up)
+	if e != nil {
+		return failEarly(e)
+	}
 	us, e := s.request(r, c, j, true)
 	if e != nil {
 		return failEarly(e)
@@ -352,28 +384,18 @@ func (s *Service) executeStream(r ExecutorRequest) (any, error) {
 		_, e = s.readJSON(us)
 		return failEarly(e)
 	}
+	// Until actual output arrives, return errors through the structured RPC
+	// envelope. host.stream.close only carries text and loses HTTP status.
+	ready := make(chan error, 1)
 	go func() {
 		defer s.active.Done()
 		attempt := Attempt{Mode: "stream", Provider: "unknown", ProviderSource: "not_reported"}
 		var err error
-		defer func() {
-			if recover() != nil {
-				err = fail(500, "ClinePassBridge stream processing failed")
-			}
-			attempt.Status = statusOf(err)
-			attempt.Error = safeError(err)
-			attempt.DurationMS = time.Since(start).Milliseconds()
-			entry.Attempts = append(entry.Attempts, attempt)
-			entry.Status = attempt.Status
-			entry.Error = attempt.Error
-			entry.DurationMS = attempt.DurationMS
-			s.appendLog(entry)
-			_ = s.call("host.stream.close", map[string]any{"stream_id": r.StreamID, "error": safeError(err)}, nil)
-		}()
-		_, err = s.consumeSSE(us, r.Model, &entry, &attempt, start, func(b []byte) error {
-			// CPA v7.3.12 passes native Chat Completions through as raw JSON,
-			// but its OpenAI-to-Claude translator requires SSE input. The host
-			// rewrites Format/SourceFormat; request_path preserves the HTTP route.
+		started := false
+		var pending [][]byte
+		pendingBytes := 0
+		emit := func(b []byte) error {
+			// Preserve CPA's native Chat/Responses and Claude framing contracts.
 			if str(r.Metadata["request_path"]) == "/v1/messages" {
 				b = append(append([]byte("data: "), b...), []byte("\n\n")...)
 			}
@@ -381,7 +403,70 @@ func (s *Service) executeStream(r ExecutorRequest) (any, error) {
 				return fail(499, "client disconnected")
 			}
 			return nil
-		})
+		}
+		defer func() {
+			if recover() != nil {
+				err = fail(500, "ClinePassBridge stream processing failed")
+			}
+			if !started && err == nil {
+				err = fail(502, "upstream stream ended before any completion frame")
+			}
+			attempt.Status = statusOf(err)
+			attempt.Error = safeError(err)
+			logErrorDetails(&entry, &attempt, err)
+			attempt.DurationMS = time.Since(start).Milliseconds()
+			entry.Attempts = append(entry.Attempts, attempt)
+			entry.Status = attempt.Status
+			entry.Error = attempt.Error
+			entry.DurationMS = attempt.DurationMS
+			lease.finish(err)
+			s.appendLog(entry)
+			if !started {
+				ready <- err
+			} else {
+				_ = s.call("host.stream.close", map[string]any{"stream_id": r.StreamID, "error": safeError(err)}, nil)
+			}
+		}()
+		_, err = s.consumeSSE(us, r.Model, &entry, &attempt, start, func(b []byte) error {
+			if !started {
+				frame, _ := decodeObject(b)
+				if !startsCompletion(frame) {
+					pendingBytes += len(b)
+					if pendingBytes > 64<<10 {
+						return fail(502, "upstream stream prelude exceeds 64 KiB")
+					}
+					pending = append(pending, b)
+					return nil
+				}
+				started = true
+				lease.finish(nil) // The single recovery probe reached model output.
+				ready <- nil
+				for _, frame := range pending {
+					if e := emit(frame); e != nil {
+						return e
+					}
+				}
+				pending = nil
+			}
+			return emit(b)
+		}, number(j["n"]))
 	}()
+	if err := <-ready; err != nil {
+		return nil, err
+	}
 	return map[string]any{"headers": http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}}}, nil
+}
+
+func startsCompletion(frame map[string]any) bool {
+	if contentStarted(frame) {
+		return true
+	}
+	for _, raw := range list(frame["choices"]) {
+		choice := object(raw)
+		delta := object(choice["delta"])
+		if str(delta["refusal"]) != "" || len(object(delta["function_call"])) > 0 || str(choice["finish_reason"]) != "" {
+			return true
+		}
+	}
+	return false
 }

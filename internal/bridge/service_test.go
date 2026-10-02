@@ -312,7 +312,7 @@ func TestStreamErrorsAreReported(t *testing.T) {
 		plan   hostPlan
 		needle string
 	}{
-		{"missing DONE", ssePlan(sseFrame(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "partial"}, "finish_reason": "stop"}}})), "before [DONE]"},
+		{"missing DONE and finish", ssePlan(sseFrame(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "partial"}}}})), "before [DONE]"},
 		{"event error", ssePlan([]byte("event: error\r\ndata: {\"error\":{\"message\":\"quota exhausted\"}}\r\n\r\n")), "quota exhausted"},
 		{"transport interruption", hostPlan{status: 200, header: http.Header{"Content-Type": []string{"text/event-stream"}}, chunks: []readChunk{{Payload: sseFrame(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "partial"}}}})}, {Error: "connection reset", Done: true}}}, "connection reset"},
 	} {
@@ -480,11 +480,17 @@ func TestShutdownClosesAndWaitsForActiveStream(t *testing.T) {
 	releaseRead := make(chan struct{})
 	clientClosed := make(chan struct{})
 	var startOnce, releaseOnce, closeOnce sync.Once
+	firstRead := true
 	s.SetHost(func(method string, payload, out any) error {
 		switch method {
 		case "host.http.do_stream":
 			*out.(*upstreamStream) = upstreamStream{StatusCode: 200, Headers: http.Header{"Content-Type": []string{"text/event-stream"}}, StreamID: "blocked-upstream"}
 		case "host.http.stream_read":
+			if firstRead {
+				firstRead = false
+				*out.(*readChunk) = readChunk{Payload: sseFrame(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "hello"}}}})}
+				return nil
+			}
 			startOnce.Do(func() { close(readStarted) })
 			<-releaseRead
 			*out.(*readChunk) = readChunk{Error: "stream canceled", Done: true}
@@ -492,6 +498,7 @@ func TestShutdownClosesAndWaitsForActiveStream(t *testing.T) {
 			releaseOnce.Do(func() { close(releaseRead) })
 		case "host.stream.close":
 			closeOnce.Do(func() { close(clientClosed) })
+		case "host.stream.emit":
 		default:
 			return fmt.Errorf("unexpected host callback %s", method)
 		}

@@ -66,17 +66,18 @@ func (d *SSEDecoder) End() error {
 }
 
 type completion struct {
-	root      map[string]any
-	choices   map[int64]map[string]any
-	tools     map[int64]map[int64]map[string]any
-	usage     map[string]any
-	finished  bool
-	done      bool
-	hasOutput bool
+	root            map[string]any
+	choices         map[int64]map[string]any
+	tools           map[int64]map[int64]map[string]any
+	usage           map[string]any
+	finished        bool
+	done            bool
+	hasOutput       bool
+	expectedChoices int64
 }
 
 func newCompletion() *completion {
-	return &completion{root: map[string]any{}, choices: map[int64]map[string]any{}, tools: map[int64]map[int64]map[string]any{}}
+	return &completion{root: map[string]any{}, choices: map[int64]map[string]any{}, tools: map[int64]map[int64]map[string]any{}, expectedChoices: 1}
 }
 func (c *completion) observe(j map[string]any) {
 	for _, k := range []string{"id", "created", "model", "system_fingerprint", "provider"} {
@@ -186,12 +187,57 @@ func (c *completion) allFinished() bool {
 		return false
 	}
 	for _, ch := range c.choices {
-		if ch["finish_reason"] == nil {
+		if strings.TrimSpace(str(ch["finish_reason"])) == "" {
 			return false
 		}
 	}
 	return true
 }
+
+// Some providers close a complete Chat stream without the terminal
+// marker. Only accept a clean EOF when every choice is finished and any tool
+// arguments are complete. Transport errors and partial SSE frames never use
+// this fallback, and usage chunks arriving after finish_reason are still read.
+func (c *completion) completeAtEOF() bool {
+	if !c.hasOutput || !c.allFinished() {
+		return false
+	}
+	if int64(len(c.choices)) != c.expectedChoices {
+		return false
+	}
+	for i := int64(0); i < c.expectedChoices; i++ {
+		if c.choices[i] == nil {
+			return false
+		}
+	}
+	validFunction := func(f map[string]any) bool {
+		if strings.TrimSpace(str(f["name"])) == "" {
+			return false
+		}
+		var args map[string]any
+		return json.Unmarshal([]byte(str(f["arguments"])), &args) == nil && args != nil
+	}
+	for index, choice := range c.choices {
+		tools := c.tools[index]
+		legacy := object(object(choice["message"])["function_call"])
+		if str(choice["finish_reason"]) == "tool_calls" && len(tools) == 0 {
+			return false
+		}
+		if str(choice["finish_reason"]) == "function_call" && legacy == nil {
+			return false
+		}
+		for _, tool := range tools {
+			if strings.TrimSpace(str(tool["id"])) == "" || !validFunction(object(tool["function"])) {
+				return false
+			}
+		}
+		if legacy != nil && !validFunction(legacy) {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *completion) result(model string) ([]byte, error) {
 	if !c.done || !c.allFinished() {
 		return nil, fail(502, "upstream stream ended before a completion and [DONE]")

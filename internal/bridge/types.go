@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const Version = "0.1.8"
+const Version = "0.1.9"
 const Provider = "cline-pass"
 const PluginID = "clinepassbridge"
 
@@ -71,7 +71,10 @@ type RequestErrorRule struct {
 }
 
 func requestErrorRules() []RequestErrorRule {
-	return []RequestErrorRule{{Status: 500, Match: []string{"empty response content"}, Action: "stop"}}
+	return []RequestErrorRule{
+		{Status: 500, Match: []string{"empty response content"}, Action: "stop"},
+		{Status: 429, Match: []string{rateLimitMarker}, Action: "stop"},
+	}
 }
 
 type Model struct {
@@ -124,38 +127,49 @@ func (c *Config) validate() error {
 }
 
 type Attempt struct {
-	Status         int    `json:"status"`
-	Mode           string `json:"mode"`
-	Provider       string `json:"provider"`
-	ProviderSource string `json:"provider_source"`
-	DurationMS     int64  `json:"duration_ms"`
-	Error          string `json:"error,omitempty"`
+	ErrorKind           string `json:"error_kind,omitempty"`
+	UpstreamHTTPStatus  int    `json:"upstream_http_status,omitempty"`
+	UpstreamErrorStatus int    `json:"upstream_error_status,omitempty"`
+	UpstreamSkipped     bool   `json:"upstream_skipped,omitempty"`
+	Status              int    `json:"status"`
+	Mode                string `json:"mode"`
+	Provider            string `json:"provider"`
+	ProviderSource      string `json:"provider_source"`
+	DurationMS          int64  `json:"duration_ms"`
+	Error               string `json:"error,omitempty"`
 }
 type LogEntry struct {
-	promptReported     bool
-	completionReported bool
-	estimateKey        string
-	CredentialID       string    `json:"credential_id,omitempty"`
-	UsageReported      bool      `json:"usage_reported,omitempty"`
-	CacheWriteTokens   int64     `json:"cache_write_tokens,omitempty"`
-	CacheWriteReported bool      `json:"cache_write_reported,omitempty"`
-	ID                 string    `json:"id"`
-	Time               time.Time `json:"time"`
-	Model              string    `json:"model"`
-	UpstreamModel      string    `json:"upstream_model"`
-	Stream             bool      `json:"stream"`
-	Status             int       `json:"status"`
-	Provider           string    `json:"provider"`
-	ProviderSource     string    `json:"provider_source"`
-	DurationMS         int64     `json:"duration_ms"`
-	TTFTMS             int64     `json:"ttft_ms"`
-	PromptTokens       int64     `json:"prompt_tokens"`
-	CompletionTokens   int64     `json:"completion_tokens"`
-	CachedTokens       int64     `json:"cached_tokens"`
-	ReasoningTokens    int64     `json:"reasoning_tokens"`
-	Credential         string    `json:"credential"`
-	Attempts           []Attempt `json:"attempts"`
-	Error              string    `json:"error,omitempty"`
+	ErrorKind           string     `json:"error_kind,omitempty"`
+	UpstreamHTTPStatus  int        `json:"upstream_http_status,omitempty"`
+	UpstreamErrorStatus int        `json:"upstream_error_status,omitempty"`
+	UpstreamSkipped     bool       `json:"upstream_skipped,omitempty"`
+	RetryAt             *time.Time `json:"retry_at,omitempty"`
+	RateLimitScope      string     `json:"rate_limit_scope,omitempty"`
+	promptReported      bool
+	completionReported  bool
+	estimateKey         string
+	CredentialID        string    `json:"credential_id,omitempty"`
+	UsageReported       bool      `json:"usage_reported,omitempty"`
+	CacheWriteTokens    int64     `json:"cache_write_tokens,omitempty"`
+	CacheWriteReported  bool      `json:"cache_write_reported,omitempty"`
+	ID                  string    `json:"id"`
+	Time                time.Time `json:"time"`
+	Model               string    `json:"model"`
+	UpstreamModel       string    `json:"upstream_model"`
+	Stream              bool      `json:"stream"`
+	StreamEnd           string    `json:"stream_end,omitempty"`
+	Status              int       `json:"status"`
+	Provider            string    `json:"provider"`
+	ProviderSource      string    `json:"provider_source"`
+	DurationMS          int64     `json:"duration_ms"`
+	TTFTMS              int64     `json:"ttft_ms"`
+	PromptTokens        int64     `json:"prompt_tokens"`
+	CompletionTokens    int64     `json:"completion_tokens"`
+	CachedTokens        int64     `json:"cached_tokens"`
+	ReasoningTokens     int64     `json:"reasoning_tokens"`
+	Credential          string    `json:"credential"`
+	Attempts            []Attempt `json:"attempts"`
+	Error               string    `json:"error,omitempty"`
 }
 
 func jsonBytes(v any) []byte      { b, _ := json.Marshal(v); return b }
